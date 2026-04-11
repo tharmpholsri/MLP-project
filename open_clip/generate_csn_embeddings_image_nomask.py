@@ -30,6 +30,7 @@ from generate_csn_embeddings_image import (
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse and return command-line arguments."""
     parser = argparse.ArgumentParser(description="Generate image-only no-mask CSN embeddings from checkpoint")
     parser.add_argument("--csv-file", type=str, required=True)
     parser.add_argument("--base-image-dir", type=str, default=None)
@@ -58,6 +59,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Load checkpoint, encode images through the CSN projection head, and save embeddings to disk."""
     args = parse_args()
     device = resolve_device(args.device, args.model)
 
@@ -122,9 +124,9 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     image_super_all = []
-    image_cat_all = []
+    image_subclass_all = []
     superclass_ids = []
-    category_ids = []
+    subclass_ids = []
     paths = []
 
     for i in tqdm(range(0, split_indices.size, args.batch_size), desc="Embedding batches"):
@@ -156,32 +158,32 @@ def main() -> None:
 
         z_img_np = z_img.cpu().numpy()
         image_super_all.append(z_img_np)
-        image_cat_all.append(z_img_np.copy())
+        image_subclass_all.append(z_img_np.copy())
         superclass_ids.extend(sup)
-        category_ids.extend(cat)
+        subclass_ids.extend(cat)
         paths.extend(pths)
 
     image_super = np.vstack(image_super_all)
-    image_cat = np.vstack(image_cat_all)
+    image_subclass = np.vstack(image_subclass_all)
 
     superclass_ids_np = np.asarray(superclass_ids, dtype=np.int64)
-    category_ids_np = np.asarray(category_ids, dtype=np.int64)
+    subclass_ids_np = np.asarray(subclass_ids, dtype=np.int64)
     paths_np = np.asarray(paths)
 
     prefix = args.output_prefix
     out_files = {
         "image_super": out_dir / f"{prefix}_image_super_embeddings.npy",
-        "image_category": out_dir / f"{prefix}_image_category_embeddings.npy",
+        "image_subclass": out_dir / f"{prefix}_image_subclass_embeddings.npy",
         "superclass_ids": out_dir / f"{prefix}_superclass_ids.npy",
-        "category_ids": out_dir / f"{prefix}_category_ids.npy",
+        "subclass_ids": out_dir / f"{prefix}_subclass_ids.npy",
         "paths": out_dir / f"{prefix}_paths.npy",
         "metadata": out_dir / f"{prefix}_metadata.json",
     }
 
     np.save(out_files["image_super"], image_super)
-    np.save(out_files["image_category"], image_cat)
+    np.save(out_files["image_subclass"], image_subclass)
     np.save(out_files["superclass_ids"], superclass_ids_np)
-    np.save(out_files["category_ids"], category_ids_np)
+    np.save(out_files["subclass_ids"], subclass_ids_np)
     np.save(out_files["paths"], paths_np)
 
     metadata = {
@@ -195,7 +197,7 @@ def main() -> None:
         "proj_dim": int(image_super.shape[1]),
         "image_only": True,
         "uses_mask_head": False,
-        "image_category_equals_image_super": True,
+        "image_subclass_equals_image_super": True,
         "quality_filter": quality_filter,
         "outputs": {key: str(value) for key, value in out_files.items()},
     }

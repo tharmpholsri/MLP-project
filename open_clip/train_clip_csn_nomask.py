@@ -56,6 +56,10 @@ def compute_losses(
     weights: dict[str, float],
     use_amp: bool,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compute the subclass SimCLR loss (no mask, no superclass term) for one batch.
+
+    Returns (total_loss, {component_name: loss_tensor}).
+    """
     device = next(image_head.parameters()).device
 
     idx_views = torch.stack([batch["idx_view1"], batch["idx_view3"]], dim=1)
@@ -91,6 +95,7 @@ def run_epoch(
     epoch: int,
     total_epochs: int,
 ) -> LossBundle:
+    """Run one full pass over loader in train or eval mode and return averaged losses."""
     if train:
         image_head.train()
         mode = f"Train {epoch}/{total_epochs}"
@@ -155,6 +160,7 @@ def save_checkpoint(
     train_state: TrainState,
     is_best: bool,
 ) -> None:
+    """Write per-epoch, latest, and (optionally) best checkpoint files under out_dir/checkpoints/."""
     ckpt_dir = out_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,6 +194,7 @@ def save_checkpoint(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse and return command-line arguments."""
     parser = argparse.ArgumentParser(description="Train frozen-CLIP visual-only CSN no-mask ablation")
 
     parser.add_argument("--csv-file", type=str, required=True)
@@ -229,13 +236,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resume", type=str, default=None)
 
-    parser.add_argument("--output-dir", type=str, default="/Users/boud/mlpractical/final_project/open_clip/od_training")
+    parser.add_argument("--output-dir", type=str, default="./training_output")
     parser.add_argument("--experiment-name", type=str, default=None)
 
     return parser.parse_args()
 
 
 def main() -> None:
+    """Full training loop (no-mask ablation): data loading, CLIP caching, train/val epochs, checkpointing."""
     args = parse_args()
     set_seed(args.seed)
 

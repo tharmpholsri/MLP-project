@@ -40,6 +40,10 @@ from csn_pipeline.losses import SupConLoss, two_view_supcon_loss
 from csn_pipeline.model import ProjectionHead, SharedCSNMask
 
 
+# ============================================================
+# Data structures
+# ============================================================
+
 @dataclass
 class LossBundle:
     total: float
@@ -56,6 +60,10 @@ class TrainState:
     train_history: list[dict[str, Any]]
     val_history: list[dict[str, Any]]
 
+
+# ============================================================
+# Dataset
+# ============================================================
 
 class CSNIndexMultiViewDataset(Dataset):
     """Multi-view dataset returning global record indices for (anchor, super+, cat+)."""
@@ -104,6 +112,7 @@ class CSNIndexMultiViewDataset(Dataset):
 
 
 def collate_csn_index_batch(batch: list[dict[str, int]]) -> dict[str, torch.Tensor]:
+    """Stack a list of per-sample dicts into a batched dict of tensors."""
     return {
         "idx_view1": torch.tensor([b["idx_view1"] for b in batch], dtype=torch.long),
         "idx_view2": torch.tensor([b["idx_view2"] for b in batch], dtype=torch.long),
@@ -113,7 +122,12 @@ def collate_csn_index_batch(batch: list[dict[str, int]]) -> dict[str, torch.Tens
     }
 
 
+# ============================================================
+# Device / seed utilities
+# ============================================================
+
 def set_seed(seed: int) -> None:
+    """Set random seeds for Python, NumPy, and PyTorch (including all CUDA devices)."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -121,6 +135,7 @@ def set_seed(seed: int) -> None:
 
 
 def resolve_device(device_arg: str, model_name: str) -> torch.device:
+    """Select the best available device, applying safety fallbacks for MPS/ResNet combinations."""
     if device_arg == "auto":
         if torch.cuda.is_available():
             d = "cuda"
@@ -146,12 +161,18 @@ def resolve_device(device_arg: str, model_name: str) -> torch.device:
 
 
 def freeze_clip_model(model: torch.nn.Module) -> None:
+    """Disable gradients on all CLIP parameters and set the model to eval mode."""
     for p in model.parameters():
         p.requires_grad = False
     model.eval()
 
 
+# ============================================================
+# Data split + CLIP feature cache utilities
+# ============================================================
+
 def default_split_dir_for_csv(csv_file: str | Path, seed: int, train_ratio: float) -> Path:
+    """Return the canonical split directory path derived from the CSV filename, seed, and ratio."""
     csv_path = Path(csv_file).resolve()
     ratio_tag = int(round(float(train_ratio) * 100))
     return csv_path.parent / f"{csv_path.stem}_splits_seed{int(seed)}_tr{ratio_tag}"
@@ -166,6 +187,11 @@ def create_or_load_balanced_validation_split(
     samples_per_subclass: int | None = None,
     min_samples_per_subclass: int = 2,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Carve a balanced validation set from test_indices (equal samples per subclass).
+
+    Loads existing split files if they exist and force_resplit is False.
+    Returns (val_indices, holdout_test_indices, metadata_dict).
+    """
     split_dir = Path(split_dir)
     split_dir.mkdir(parents=True, exist_ok=True)
 
@@ -255,6 +281,7 @@ def create_or_load_balanced_validation_split(
 
 
 def _records_path_hash(records) -> str:
+    """Return a SHA-1 hash of all image paths, used to detect cache invalidation."""
     h = hashlib.sha1()
     for rec in records:
         h.update(str(rec.image_path).encode("utf-8"))
@@ -271,6 +298,11 @@ def load_or_build_clip_image_cache(
     device: torch.device,
     batch_size: int,
 ) -> torch.Tensor:
+    """Return pre-computed CLIP image features for every record as a CPU float32 tensor.
+
+    Loads from cache_path if the file exists and metadata matches; otherwise
+    encodes all images with the given CLIP model and writes cache_path to disk.
+    """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     meta_path = cache_path.with_suffix(".meta.json")
 
@@ -337,6 +369,10 @@ def collect_subclass_embeddings(
     subclass_head: torch.nn.Module | None,
     batch_size: int = 512,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Project cached CLIP features through image_head (and optionally subclass_head).
+
+    Returns (embeddings [N, D], subclass_ids [N]) for all requested indices.
+    """
     device = next(image_head.parameters()).device
     idx_np = np.asarray(indices, dtype=np.int64)
     embeddings: list[np.ndarray] = []
@@ -366,6 +402,11 @@ def compute_retrieval_metrics_at_k(
     device: torch.device,
     batch_size: int = 512,
 ) -> tuple[dict[int, float], dict[int, float], dict[int, float], list[int]]:
+    """Compute precision, recall, and F1 at each k via cosine-similarity retrieval.
+
+    Returns (precision, recall, f1, clipped_k) where clipped_k lists any k
+    values that exceeded N-1 and were silently reduced.
+    """
     emb = torch.from_numpy(np.asarray(embeddings, dtype=np.float32)).to(device)
     emb = F.normalize(emb, dim=1)
     labels_t = torch.from_numpy(np.asarray(labels_eval, dtype=np.int64)).to(device)
@@ -421,6 +462,7 @@ def summarize_subclass_retrieval(
     k_values: list[int],
     batch_size: int = 512,
 ) -> dict[str, Any]:
+    """Embed validation samples and return a summary dict of precision/recall/F1 at each k."""
     embeddings, subclass_ids = collect_subclass_embeddings(
         clip_feature_cache=clip_feature_cache,
         records=records,
@@ -447,7 +489,12 @@ def summarize_subclass_retrieval(
     }
 
 
+# ============================================================
+# Validation metrics
+# ============================================================
+
 def rename_user_facing_terms(obj: Any) -> Any:
+    """Recursively replace internal 'category'/'cat_' keys with user-facing 'subclass' equivalents."""
     if isinstance(obj, dict):
         return {rename_user_facing_terms(k): rename_user_facing_terms(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -460,6 +507,10 @@ def rename_user_facing_terms(obj: Any) -> Any:
     return obj
 
 
+# ============================================================
+# Training loop
+# ============================================================
+
 def compute_losses(
     clip_feature_cache: torch.Tensor,
     batch: dict[str, torch.Tensor],
@@ -469,6 +520,10 @@ def compute_losses(
     weights: dict[str, float],
     use_amp: bool,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compute weighted superclass + subclass SimCLR losses for one batch.
+
+    Returns (total_loss, {component_name: loss_tensor}).
+    """
     device = next(image_head.parameters()).device
 
     idx_views = torch.stack(
@@ -516,6 +571,7 @@ def run_epoch(
     epoch: int,
     total_epochs: int,
 ) -> LossBundle:
+    """Run one full pass over loader in train or eval mode and return averaged losses."""
     if train:
         image_head.train()
         csn_mask.train()
@@ -587,6 +643,7 @@ def save_checkpoint(
     train_state: TrainState,
     is_best: bool,
 ) -> None:
+    """Write per-epoch, latest, and (optionally) best checkpoint files under out_dir/checkpoints/."""
     ckpt_dir = out_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -621,6 +678,7 @@ def save_checkpoint(
 
 
 def save_loss_log(out_dir: Path, train_state: TrainState) -> None:
+    """Serialise the full training history and best-model summary to loss_log.json."""
     log_path = out_dir / "loss_log.json"
     with open(log_path, "w") as f:
         json.dump(
@@ -637,7 +695,12 @@ def save_loss_log(out_dir: Path, train_state: TrainState) -> None:
         )
 
 
+# ============================================================
+# Plotting
+# ============================================================
+
 def plot_loss_curves(out_dir: Path, train_history: list[dict[str, Any]], val_history: list[dict[str, Any]]) -> None:
+    """Plot and save train/validation total-loss curves to loss_curve.png."""
     if not train_history:
         return
 
@@ -667,6 +730,7 @@ def plot_subclass_retrieval_curves(
     val_history: list[dict[str, Any]],
     k_values: list[int],
 ) -> None:
+    """Plot precision/recall/F1 at each k over epochs and save to subclass_retrieval_metrics.png."""
     if not val_history:
         return
 
@@ -694,7 +758,12 @@ def plot_subclass_retrieval_curves(
     plt.close(fig)
 
 
+# ============================================================
+# Entry point
+# ============================================================
+
 def parse_args() -> argparse.Namespace:
+    """Parse and return command-line arguments."""
     parser = argparse.ArgumentParser(description="Train frozen-CLIP visual-only CSN pipeline")
 
     parser.add_argument("--csv-file", type=str, required=True)
@@ -736,13 +805,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resume", type=str, default=None)
 
-    parser.add_argument("--output-dir", type=str, default="/Users/boud/mlpractical/final_project/open_clip/od_training")
+    parser.add_argument("--output-dir", type=str, default="./training_output")
     parser.add_argument("--experiment-name", type=str, default=None)
 
     return parser.parse_args()
 
 
 def main() -> None:
+    """Full training loop: data loading, CLIP caching, model init, train/val epochs, checkpointing."""
     args = parse_args()
     set_seed(args.seed)
 

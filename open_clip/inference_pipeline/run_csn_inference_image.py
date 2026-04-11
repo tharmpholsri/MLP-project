@@ -20,7 +20,12 @@ from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm
 
 
+# ============================================================
+# Utilities
+# ============================================================
+
 def resolve_device(device_arg: str) -> torch.device:
+    """Return the best available torch.device, or the explicitly requested one."""
     if device_arg == "auto":
         if torch.cuda.is_available():
             return torch.device("cuda")
@@ -31,6 +36,7 @@ def resolve_device(device_arg: str) -> torch.device:
 
 
 def load_array(path: Path) -> np.ndarray:
+    """Load a .npy or single-array .npz file and return a plain ndarray."""
     arr = np.load(path, allow_pickle=True)
     if isinstance(arr, np.lib.npyio.NpzFile):
         if len(arr.files) != 1:
@@ -40,14 +46,20 @@ def load_array(path: Path) -> np.ndarray:
 
 
 def _normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
+    """L2-normalise each row; clamps norm to 1e-12 to avoid division by zero."""
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     return embeddings / np.clip(norms, a_min=1e-12, a_max=None)
 
+
+# ============================================================
+# Embedding diagnostics
+# ============================================================
 
 def compute_bits_left_stats(
     embeddings: np.ndarray,
     eps_list: tuple[float, ...] = (1e-2, 1e-3, 1e-4),
 ) -> dict[str, float | int | dict[str, float | int]]:
+    """Compute per-sample active-dimension counts and global L2-norm statistics."""
     if embeddings.ndim != 2:
         raise ValueError("embeddings must be [N, D]")
 
@@ -82,11 +94,17 @@ def compute_bits_left_stats(
     }
 
 
+# ============================================================
+# Retrieval metrics
+# ============================================================
+
 def _init_purity_accumulator(k_list: list[int]) -> dict[int, dict[str, int]]:
+    """Create a zeroed counter dict for neighbourhood purity at each k."""
     return {k: {"slots": 0, "diff_cat_same_super": 0, "diff_super": 0} for k in k_list}
 
 
 def _purity_percent_from_counts(counts: dict[str, int]) -> dict[str, float]:
+    """Convert raw slot counts to percentage breakdowns for same-super-diff-cat and diff-super."""
     slots = int(counts["slots"])
     if slots <= 0:
         return {
@@ -110,6 +128,11 @@ def compute_retrieval_and_purity_at_k(
     device: torch.device,
     batch_size: int = 512,
 ) -> tuple[dict[int, float], dict[int, float], dict[int, dict[str, float]] | None, list[int]]:
+    """Compute recall@k, precision@k, and neighbourhood purity for each k.
+
+    Purity is only computed when both category_ids and superclass_ids are supplied.
+    Returns (recall, precision, purity_or_None, clipped_k_list).
+    """
     emb = torch.from_numpy(embeddings).float().to(device)
     emb = torch.nn.functional.normalize(emb, dim=1)
     labels_t = torch.from_numpy(labels_eval).to(device)
@@ -184,6 +207,7 @@ def compute_match_nonmatch_distribution(
     device: torch.device,
     block_size: int = 2000,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Return (match_sims, nonmatch_sims) from the upper-triangle pairwise cosine matrix."""
     emb = torch.from_numpy(embeddings).float().to(device)
     emb = torch.nn.functional.normalize(emb, dim=1)
     n = emb.shape[0]
@@ -214,6 +238,7 @@ def compute_match_nonmatch_distribution(
 
 
 def plot_match_nonmatch_distribution(match_sims: np.ndarray, nonmatch_sims: np.ndarray, out_path: Path, bins: int = 50) -> None:
+    """Plot overlapping histograms of match vs non-match cosine similarities and save to out_path."""
     plt.figure(figsize=(8, 4))
     plt.hist(match_sims, bins=bins, alpha=0.5, density=True, label="Match")
     plt.hist(nonmatch_sims, bins=bins, alpha=0.5, density=True, label="Non-match")
@@ -227,6 +252,10 @@ def plot_match_nonmatch_distribution(match_sims: np.ndarray, nonmatch_sims: np.n
     print(f"Saved: {out_path}")
 
 
+# ============================================================
+# Visualisation
+# ============================================================
+
 def run_tsne(
     embeddings: np.ndarray,
     labels: np.ndarray,
@@ -235,6 +264,7 @@ def run_tsne(
     subsample: int | None = 5000,
     random_state: int = 42,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Optionally subsample and run t-SNE. Returns (coords_2d, labels_subset, indices_used)."""
     n = embeddings.shape[0]
     if subsample is not None and n > subsample:
         rng = np.random.default_rng(random_state)
@@ -262,6 +292,7 @@ def plot_tsne(
     contour_label_name: str = "Superclass 90% contours",
     title: str = "t-SNE of Embeddings",
 ) -> None:
+    """Scatter plot of 2-D t-SNE coords, optionally overlaying tail markers, class centers, and 90% ellipses."""
     plt.figure(figsize=(10, 8))
     cmap = "tab20" if np.unique(labels).size <= 20 else "viridis"
 
@@ -405,7 +436,15 @@ def plot_tsne(
     print(f"Saved: {out_path}")
 
 
+# ============================================================
+# Class-center and tail-sample analysis
+# ============================================================
+
 def compute_class_centers(emb_norm: np.ndarray, labels: np.ndarray):
+    """Compute L2-normalised class centroids and each sample's cosine similarity to its own center.
+
+    Returns (classes, centers [C, D], own_class_sim [N]).
+    """
     classes = np.unique(labels)
     class_to_idx = {c: i for i, c in enumerate(classes)}
     d = emb_norm.shape[1]
@@ -425,6 +464,7 @@ def compute_class_centers(emb_norm: np.ndarray, labels: np.ndarray):
 
 
 def get_tail_sample_indices(labels: np.ndarray, own_class_sim: np.ndarray, classes: np.ndarray, tail_samples_per_class: int) -> np.ndarray:
+    """Return indices of the tail_samples_per_class lowest-similarity samples in each class."""
     picked = []
     for c in classes:
         idx = np.where(labels == c)[0]
@@ -440,6 +480,7 @@ def get_tail_sample_indices(labels: np.ndarray, own_class_sim: np.ndarray, class
 
 
 def save_intra_class_stats(labels: np.ndarray, own_class_sim: np.ndarray, classes: np.ndarray, out_path: Path) -> None:
+    """Write per-class centre-similarity statistics (mean, std, min, max) to a CSV file."""
     rows = []
     for c in classes:
         idx = np.where(labels == c)[0]
@@ -474,6 +515,7 @@ def save_intra_class_stats(labels: np.ndarray, own_class_sim: np.ndarray, classe
 
 
 def _safe_open_image(path: str) -> Image.Image:
+    """Open an image as RGB; return a blank 224×224 black image on any error."""
     try:
         return Image.open(path).convert("RGB")
     except Exception:
@@ -481,6 +523,7 @@ def _safe_open_image(path: str) -> Image.Image:
 
 
 def _format_path_for_overlay(path: str, width: int = 55) -> str:
+    """Wrap a file path string to width characters for use in matplotlib text overlays."""
     return "\n".join(textwrap.wrap(path, width=width)) if path else "N/A"
 
 
@@ -494,6 +537,7 @@ def generate_tail_sample_analysis(
     out_dir: Path,
     tail_samples_per_class: int = 20,
 ) -> None:
+    """For each class, save a figure per tail sample showing the image, its nearest neighbor, and center similarities."""
     if len(image_paths) != emb_norm.shape[0]:
         raise ValueError(
             f"image_paths length mismatch: paths={len(image_paths)}, embeddings={emb_norm.shape[0]}"
@@ -639,7 +683,12 @@ def generate_tail_sample_analysis(
     print(f"Saved: {summary_path}")
 
 
+# ============================================================
+# Summary statistics helpers
+# ============================================================
+
 def summarize_values(values: np.ndarray) -> dict[str, float | int | None]:
+    """Return count/mean/std/min/p25/median/p75/max for an array; all-None if empty."""
     if values.size == 0:
         return {
             "count": 0,
@@ -664,6 +713,7 @@ def summarize_values(values: np.ndarray) -> dict[str, float | int | None]:
 
 
 def save_hist(values: np.ndarray, out_path: Path, title: str, x_label: str, bins: int = 50) -> None:
+    """Plot and save a simple histogram; renders a 'No valid samples' message if values is empty."""
     plt.figure(figsize=(8, 4))
     if values.size > 0:
         plt.hist(values, bins=bins, alpha=0.85)
@@ -693,6 +743,7 @@ def compute_covariance_summary(
     out_csv: Path,
     label_col_name: str,
 ) -> dict[str, float | int | None]:
+    """Compute per-class covariance trace and mean diagonal variance; write to CSV and return summary stats."""
     rows: list[dict[str, float | int]] = []
     classes = np.unique(labels)
     d = emb_norm.shape[1]
@@ -747,6 +798,7 @@ def compute_angular_distance_analysis(
     category_ids: np.ndarray,
     out_dir: Path,
 ) -> dict[str, Any]:
+    """Compute angular distance from each sample to its category centroid; save histogram and per-category CSV."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
     categories = np.unique(category_ids)
@@ -810,6 +862,7 @@ def compute_margin_analysis(
     ann_candidates: int,
     max_k: int,
 ) -> dict[str, Any]:
+    """Compute intra- and inter-superclass margin distributions using approximate nearest neighbours."""
     out_dir.mkdir(parents=True, exist_ok=True)
     by_category_dir = out_dir / "by_category"
     by_category_dir.mkdir(parents=True, exist_ok=True)
@@ -991,6 +1044,10 @@ def compute_margin_analysis(
     return global_summary
 
 
+# ============================================================
+# Evaluation orchestration
+# ============================================================
+
 def evaluate_space(
     embeddings: np.ndarray,
     labels_eval: np.ndarray,
@@ -1007,6 +1064,7 @@ def evaluate_space(
     contour_overlay_name: str = "Superclass 90% contours",
     embedding_mode: str = "unknown",
 ) -> None:
+    """Run the full evaluation suite (retrieval, purity, covariance, margins, t-SNE, tail analysis) for one embedding space."""
     if labels_eval.shape[0] != embeddings.shape[0]:
         raise ValueError(f"Shape mismatch for {tag}: embeddings={embeddings.shape[0]}, labels={labels_eval.shape[0]}")
     if center_overlay_labels is not None and center_overlay_labels.shape[0] != embeddings.shape[0]:
@@ -1216,7 +1274,12 @@ def evaluate_space(
         print(f"\n[{tag}] Skipping tail analysis (--skip-tail-analysis).")
 
 
+# ============================================================
+# Entry point
+# ============================================================
+
 def parse_args() -> argparse.Namespace:
+    """Parse and return command-line arguments."""
     parser = argparse.ArgumentParser(description="Image-only CSN inference with extended evaluation")
 
     parser.add_argument("--embeddings", type=Path, default=None)
@@ -1249,6 +1312,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Load embeddings from disk and run the full image-only CSN evaluation suite."""
     args = parse_args()
     device = resolve_device(args.device)
     args.output_dir = args.output_dir.resolve()
