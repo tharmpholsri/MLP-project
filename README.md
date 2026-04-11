@@ -1,9 +1,5 @@
 # Hierarchical Conditional Similarity Learning for Fine-Grained Visual Retrieval
 
-**Reshaping CLIP's Embedding Geometry**
-
-> MLP Practical 2025/26 — University of Edinburgh
-
 ---
 
 ## What is this project?
